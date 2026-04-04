@@ -1,0 +1,680 @@
+/*
+===============================================================================
+DDL Script: Create Silver Tables
+===============================================================================
+Script Purpose:
+    This script creates tables in the 'silver' schema, dropping existing tables 
+    if they already exist.
+	  Run this script to re-define the DDL structure of 'bronze' Tables
+===============================================================================
+*/
+
+IF OBJECT_ID('silver.crm_cust_info', 'U') IS NOT NULL
+    DROP TABLE silver.crm_cust_info;
+GO
+
+CREATE TABLE silver.crm_cust_info (
+    cst_id             INT,
+    cst_key            NVARCHAR(50),
+    cst_firstname      NVARCHAR(50),
+    cst_lastname       NVARCHAR(50),
+    cst_marital_status NVARCHAR(50),
+    cst_gndr           NVARCHAR(50),
+    cst_create_date    DATE,
+    dwh_create_date    DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+IF OBJECT_ID('silver.crm_prd_info', 'U') IS NOT NULL
+    DROP TABLE silver.crm_prd_info;
+GO
+
+CREATE TABLE silver.crm_prd_info (
+    prd_id          INT,
+    cat_id          NVARCHAR(50),
+    prd_key         NVARCHAR(50),
+    prd_nm          NVARCHAR(50),
+    prd_cost        INT,
+    prd_line        NVARCHAR(50),
+    prd_start_dt    DATE,
+    prd_end_dt      DATE,
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+IF OBJECT_ID('silver.crm_sales_details', 'U') IS NOT NULL
+    DROP TABLE silver.crm_sales_details;
+GO
+
+CREATE TABLE silver.crm_sales_details (
+    sls_ord_num     NVARCHAR(50),
+    sls_prd_key     NVARCHAR(50),
+    sls_cust_id     INT,
+    sls_order_dt    DATE,
+    sls_ship_dt     DATE,
+    sls_due_dt      DATE,
+    sls_sales       INT,
+    sls_quantity    INT,
+    sls_price       INT,
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+IF OBJECT_ID('silver.erp_loc_a101', 'U') IS NOT NULL
+    DROP TABLE silver.erp_loc_a101;
+GO
+
+CREATE TABLE silver.erp_loc_a101 (
+    cid             NVARCHAR(50),
+    cntry           NVARCHAR(50),
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+IF OBJECT_ID('silver.erp_cust_az12', 'U') IS NOT NULL
+    DROP TABLE silver.erp_cust_az12;
+GO
+
+CREATE TABLE silver.erp_cust_az12 (
+    cid             NVARCHAR(50),
+    bdate           DATE,
+    gen             NVARCHAR(50),
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+IF OBJECT_ID('silver.erp_px_cat_g1v2', 'U') IS NOT NULL
+    DROP TABLE silver.erp_px_cat_g1v2;
+GO
+
+CREATE TABLE silver.erp_px_cat_g1v2 (
+    id              NVARCHAR(50),
+    cat             NVARCHAR(50),
+    subcat          NVARCHAR(50),
+    maintenance     NVARCHAR(50),
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+GO
+
+
+/*
+
+Data Quality Checks on BRONZE Layer tables
+Before we clean and then put clean data in SILVER Layer
+
+*/
+
+-- PROBLEM 1:- 
+-- Check NULLS and Duplicates in PK
+
+SELECT 
+	cst_id, count(*) 
+FROM [DataWarehouse].[Bronze].[crm_cust_info]
+GROUP BY cst_id
+HAVING count(*) > 1 OR cst_id is NULL
+
+-- Solution - RANK the data and Pick the record that is Most recent
+Select * from
+(
+	SELECT 
+		*, ROW_NUMBER() OVER(PARTITION BY cst_id ORDER BY cst_create_date DESC) flag_last 
+	FROM [DataWarehouse].[Bronze].[crm_cust_info]
+) t where flag_last = 1
+
+
+-- PROBLEM 2:- 
+-- Unwanted Sapces in STRING Values like FirstName
+-- Expectation - NO Results
+
+Select cst_firstname
+FROM [DataWarehouse].[Bronze].[crm_cust_info]
+where cst_firstname != TRIM(cst_firstname)
+
+-- solution -TRIM
+
+-- PROBLEM 3
+-- Check the consistency of values in Low Cardinality Columns like "Marital Status and Gender"
+
+-- 3.1 -- Gender Values
+Select distinct cst_gndr
+FROM [DataWarehouse].[Bronze].[crm_cust_info] -- Null, M, F
+
+-- 3.2 -- Marital Status
+Select distinct cst_marital_status
+FROM [DataWarehouse].[Bronze].[crm_cust_info]
+
+-- Solution 2 & 3 ---- Data Standaridation
+-- let's say we have Rule in DWH we will store only clear and meaningful values -- No Abbrevaitions.
+-- Male and Female and for NULLS use n/a
+
+Select 
+	cst_id, 
+	cst_key,
+	TRIM(cst_firstname) as cst_firstnamke,
+	TRIM(cst_lastname) as cst_lastname,
+	
+	CASE
+		WHEN UPPER(TRIM(cst_marital_status)) = 'S' THEN 'Single' -- Gender values if in Lower case -- convert into upper case -- Also TRIM
+		WHEN UPPER(TRIM(cst_marital_status)) = 'M' THEN 'Married'
+		ELSE 'n/a'
+	END as cst_marital_status,
+
+	CASE
+		WHEN UPPER(TRIM(cst_gndr)) = 'M' THEN 'Male' -- Gender values if in Lower case -- convert into upper case
+		WHEN UPPER(TRIM(cst_gndr)) = 'F' THEN 'Female'
+		ELSE 'n/a'
+	END as cst_gndr,
+	cst_create_date
+FROM [DataWarehouse].[Bronze].[crm_cust_info]
+
+
+-- Insert cleaned Data BRONZE >> SILVER
+
+INSERT INTO silver.crm_cust_info
+	(
+		cst_id,
+		cst_key,
+		cst_firstname,
+		cst_lastname,
+		cst_marital_status,
+		cst_gndr,
+		cst_create_date
+	)
+Select 
+	cst_id, 
+	cst_key,
+	TRIM(cst_firstname) as cst_firstnamke,
+	TRIM(cst_lastname) as cst_lastname,
+	
+	CASE
+		WHEN UPPER(TRIM(cst_marital_status)) = 'S' THEN 'Single' -- Gender values if in Lower case -- convert into upper case -- Also TRIM
+		WHEN UPPER(TRIM(cst_marital_status)) = 'M' THEN 'Married'
+		ELSE 'n/a'
+	END as cst_marital_status,
+
+	CASE
+		WHEN UPPER(TRIM(cst_gndr)) = 'M' THEN 'Male' -- Gender values if in Lower case -- convert into upper case
+		WHEN UPPER(TRIM(cst_gndr)) = 'F' THEN 'Female'
+		ELSE 'n/a'
+	END as cst_gndr,
+	cst_create_date
+FROM (
+		SELECT
+				*,
+				ROW_NUMBER() OVER (PARTITION BY cst_id ORDER BY cst_create_date DESC) AS flag_last
+			FROM bronze.crm_cust_info
+			WHERE cst_id IS NOT NULL
+		) t
+		WHERE flag_last = 1;
+
+-- After Loading dta into SILVER
+-- Check Data Qulaity in Silver Data'
+
+-- Check NULLS and Duplicates in PK
+SELECT 
+	cst_id, count(*) 
+FROM [DataWarehouse].[Silver].[crm_cust_info]
+GROUP BY cst_id
+HAVING count(*) > 1 OR cst_id is NULL
+
+-- Check FirstNames for Empty Spaces
+Select cst_firstname
+FROM [DataWarehouse].Silver.[crm_cust_info]
+where cst_firstname != TRIM(cst_firstname)
+
+-- Check gender data
+Select distinct cst_gndr
+FROM [DataWarehouse].Silver.[crm_cust_info]
+
+Select * FROM [DataWarehouse].Silver.[crm_cust_info]
+/*
+
+-- 2 -- Load bronze.crm_prd_info >> Silver
+
+*/
+
+Select * from bronze.crm_prd_info
+
+-- Check Duplicay and Nulls in PK.
+SELECT 
+	prd_id, count(*) 
+FROM [DataWarehouse].bronze.crm_prd_info
+GROUP BY prd_id
+HAVING count(*) > 1 OR prd_id is NULL
+
+-- Split the prd_key column into Cat_ID and PRD_Key -- SUBSTRING
+-- also Cat_ID in another table has _ but current Cat_ID has - REPLACE - As these two tables will be joined in GOLD Layer
+-- Handle it
+
+-- After Inserting data also check Data Quality w below diff Codes
+
+-- Final Cleaned Products Infomation
+INSERT INTO Silver.crm_prd_info(
+	prd_id,
+	cat_id,
+	prd_key,
+	prd_nm,
+	prd_cost,
+	prd_line,
+	prd_start_dt,
+	prd_end_dt
+	)
+Select 
+	prd_id,
+	REPLACE(SUBSTRING(prd_key, 1, 5), '-', '_') AS cat_id,
+	SUBSTRING(prd_key, 7, LEN(prd_key)) AS prd_key,
+	prd_nm,
+	ISNULL(prd_cost, 0) AS prd_cost,
+	CASE
+		WHEN UPPER(TRIM(prd_line)) = 'M' THEN 'Mountain'
+		WHEN UPPER(TRIM(prd_line)) = 'R' THEN 'Road' 
+		WHEN UPPER(TRIM(prd_line)) = 'S' THEN 'Other Sales' 
+		WHEN UPPER(TRIM(prd_line)) = 'T' THEN 'Touring'
+		ELSE 'n/a'
+		END AS prd_line,
+	CAST(prd_start_dt AS DATE) AS prd_start_dt ,
+	CAST(LEAD(prd_start_dt) OVER(PARTITION BY prd_key ORDER BY prd_start_dt) - 1 AS DATE) AS prd_end_det
+from bronze.crm_prd_info
+
+-- We need to change Metadata in Silver Layer for Products Info
+
+
+IF OBJECT_ID('silver.crm_prd_info', 'U') IS NOT NULL
+DROP TABLE silver.crm_prd_info;
+CREATE TABLE silver.crm_prd_info (
+    prd_id          INT,
+    cat_id          NVARCHAR(50),
+    prd_key         NVARCHAR(50),
+    prd_nm          NVARCHAR(50),
+    prd_cost        INT,
+    prd_line        NVARCHAR(50),
+    prd_start_dt    DATE,
+    prd_end_dt      DATE,
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+
+Select * from bronze.crm_sales_details
+
+Select * from bronze.erp_px_cat_g1v2
+
+-- Check Unwanted Spaces in prd_nm -- NO PROBLEM
+Select prd_nm
+from Silver.crm_prd_info
+where prd_nm != TRIM(prd_nm) 
+
+-- Check for NULLS or -ve Numbers -- If NULLS replace with 0.
+-- Expected: NO RESULT
+Select prd_cost
+from bronze.crm_prd_info
+WHERE prd_cost < 0 OR prd_cost IS NULL
+
+-- Data Standarization and Consistency on LOW Cardinality Column -- CASE
+Select DISTINCT prd_line
+from bronze.crm_prd_info
+
+-- Check for Invalid Date Orders like Start Date > End Date
+-- Solution - Keep Original Start Date and Start Date of Next Record - 1 will take End date of last record. 
+Select *
+from bronze.crm_prd_info
+where prd_start_dt > prd_end_dt
+
+-- soultion
+Select 
+	prd_id,
+	prd_key,
+	prd_nm,
+	prd_start_dt,
+	prd_end_dt,
+	LEAD(prd_start_dt) OVER(PARTITION BY prd_key ORDER BY prd_start_dt) - 1 AS prd_end_det_test
+from bronze.crm_prd_info
+where prd_key IN ('AC-HE-HL-U509-R', 'AC-HE-HL-U509')
+
+
+Select * from Silver.crm_prd_info
+
+
+-- Load and Clean "bronze.crm_sales_details"
+-- data Quality checks 
+
+-- Negative amd 0 dates can't be CASTED into Date Values
+	-- If any -ve and 0 Values Convert them into NULLs -- w NULLIF Function
+-- Checking for OUTLIERS w RANGE VALUES 
+select 
+	sls_order_dt
+from Bronze.crm_sales_details
+where sls_order_dt <= 0 
+OR LEN(sls_order_dt) != 8
+OR sls_order_dt > 20500101  -- Checking Outliers using Boundry Ranges.
+OR sls_order_dt < 19000101  -- Checking Outliers using Boundry Ranges.
+
+-- Check Quality of Ship_DT
+-- No problem here
+select 
+	sls_ship_dt
+from Bronze.crm_sales_details
+where sls_ship_dt <= 0 
+OR LEN(sls_ship_dt) != 8
+OR sls_ship_dt > 20500101  -- Checking Outliers using Boundry Ranges.
+OR sls_ship_dt < 19000101  -- Checking Outliers using Boundry Ranges.
+
+-- Check Quality of Due_DT
+-- No problem here
+select 
+	sls_due_dt
+from Bronze.crm_sales_details
+where sls_due_dt <= 0 
+OR LEN(sls_due_dt) != 8
+OR sls_due_dt > 20500101  -- Checking Outliers using Boundry Ranges.
+OR sls_due_dt < 19000101  -- Checking Outliers using Boundry Ranges.
+
+-- Check for Invalid Date Orders
+-- OrderDate < ShipDate < DueDate -- MUST
+select 
+	*
+from Bronze.crm_sales_details
+WHERE sls_order_dt > sls_ship_dt OR sls_order_dt > sls_due_dt
+
+-- Sales Calculation
+-- Sales Price = Qty * Unit Price
+-- NULLS, 0, -ve Values Not allowed
+
+-- How to FIX
+	-- CASE 1 --- If Sales is NULL / -VE / 0 / Wrong Formula >>>>> then Do Qty * Price
+	-- CASE 2 --- If Price is NULL / 0   >>>>> Then do Sales / Qty
+	-- CASE 2 --- If Price is Negative   >>>>> Then Convert to +ve Value
+
+select DISTINCT 
+	sls_sales as Old_Sales,
+	sls_quantity,
+	sls_price as Old_Prince,
+
+	CASE
+		WHEN sls_sales IS NULL OR sls_sales <=0 OR sls_sales != ABS(sls_price) * sls_quantity
+			THEN ABS(sls_price) * sls_quantity
+		ELSE sls_sales
+	END AS sls_sales,
+
+	CASE	
+		WHEN sls_price IS NULL OR sls_price <= 0
+			THEN sls_sales / NULLIF(sls_quantity, 0)       -- If Qty is 0 take it as NULL -- DIVISON BY ZERO Handling
+		ELSE sls_price
+	END AS sls_price
+from Bronze.crm_sales_details
+WHERE sls_sales != sls_price * sls_quantity
+OR sls_sales IS NULL OR sls_quantity IS NULL OR sls_price IS NULL
+OR sls_sales <= 0 OR sls_quantity <= 0 OR sls_price <= 0
+ORDER BY sls_sales, sls_quantity, sls_price
+
+
+-- Finally -- CLEANSED DATA
+
+select 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	CASE
+		WHEN sls_order_dt = 0 OR LEN(sls_order_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_order_dt AS VARCHAR) AS DATE)
+	END AS sls_order_dt,
+
+	CASE
+		WHEN sls_ship_dt = 0 OR LEN(sls_ship_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_ship_dt AS VARCHAR) AS DATE)
+	END AS sls_ship_dt,
+
+	CASE
+		WHEN sls_due_dt = 0 OR LEN(sls_due_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_due_dt AS VARCHAR) AS DATE)
+	END AS sls_due_dt,
+
+	CASE
+		WHEN sls_sales IS NULL OR sls_sales <=0 OR sls_sales != ABS(sls_price) * sls_quantity
+			THEN ABS(sls_price) * sls_quantity
+		ELSE sls_sales
+	END AS sls_sales,
+	sls_quantity,
+	CASE	
+		WHEN sls_price IS NULL OR sls_price <= 0
+			THEN sls_sales / NULLIF(sls_quantity, 0)       -- If Qty is 0 take it as NULL -- DIVISON BY ZERO Handling
+		ELSE sls_price
+	END AS sls_price
+
+from Bronze.crm_sales_details
+-- where sls_ord_num != TRIM(sls_ord_num)
+-- where sls_prd_key NOT IN (Select prd_key from Silver.crm_prd_info)
+-- WHERE sls_cust_id NOT IN (Select cst_id from  Silver.crm_cust_info)
+
+
+-- Check DDLs in  SILVER Layer -- Before Moving Data
+-- To match Metadata
+IF OBJECT_ID('silver.crm_sales_details', 'U') IS NOT NULL
+    DROP TABLE silver.crm_sales_details;
+GO
+CREATE TABLE silver.crm_sales_details (
+    sls_ord_num     NVARCHAR(50),
+    sls_prd_key     NVARCHAR(50),
+    sls_cust_id     INT,
+    sls_order_dt    DATE,
+    sls_ship_dt     DATE,
+    sls_due_dt      DATE,
+    sls_sales       INT,
+    sls_quantity    INT,
+    sls_price       INT,
+    dwh_create_date DATETIME2 DEFAULT GETDATE()
+);
+
+-- MOVE Cleansed Data into SILVER
+
+INSERT INTO Silver.crm_sales_details
+	(
+		sls_ord_num,
+		sls_prd_key,
+		sls_cust_id,
+		sls_order_dt,
+		sls_ship_dt,
+		sls_due_dt,
+		sls_sales,
+		sls_quantity,
+		sls_price
+	)
+
+select 
+	sls_ord_num,
+	sls_prd_key,
+	sls_cust_id,
+	CASE
+		WHEN sls_order_dt = 0 OR LEN(sls_order_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_order_dt AS VARCHAR) AS DATE)
+	END AS sls_order_dt,
+
+	CASE
+		WHEN sls_ship_dt = 0 OR LEN(sls_ship_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_ship_dt AS VARCHAR) AS DATE)
+	END AS sls_ship_dt,
+
+	CASE
+		WHEN sls_due_dt = 0 OR LEN(sls_due_dt) != 8 THEN NULL  -- -- Converting Dates columns from Int >>> Varchar >>> Date types
+		ELSE CAST(CAST(sls_due_dt AS VARCHAR) AS DATE)
+	END AS sls_due_dt,
+
+	CASE
+		WHEN sls_sales IS NULL OR sls_sales <=0 OR sls_sales != ABS(sls_price) * sls_quantity
+			THEN ABS(sls_price) * sls_quantity
+		ELSE sls_sales
+	END AS sls_sales,
+	sls_quantity,
+	CASE	
+		WHEN sls_price IS NULL OR sls_price <= 0
+			THEN sls_sales / NULLIF(sls_quantity, 0)       -- If Qty is 0 take it as NULL -- DIVISON BY ZERO Handling
+		ELSE sls_price
+	END AS sls_price
+
+from Bronze.crm_sales_details
+
+-- check data in SILVER Sales Table
+Select * from Silver.crm_sales_details
+
+-- Now do same checks on Data Quality in SILVER Colmuns as well
+-- do
+
+
+/*
+
+ERP Tables
+
+*/
+
+Select * from Silver.crm_cust_info
+
+Select 
+	cid,
+	bdate,
+	gen
+from Bronze.erp_cust_az12
+
+-- Cid will be linked to Cst_Key other table
+-- Remove NAS from Starting
+
+Select 
+
+	CASE
+		WHEN cid like 'NAS%' THEN SUBSTRING(cid, 4, LEN(cid))
+		ELSE cid
+	END AS cid,
+	bdate,
+	gen
+from Bronze.erp_cust_az12
+
+
+-- Data Quality for Bdate Column
+-- Solution -- Replace w NULLS
+Select bdate
+from Bronze.erp_cust_az12
+where bdate < '1924-01-01' OR bdate > GetDate()
+
+
+-- Gender is Low Cardinality Columns so check all Possible Values in it
+	Select 
+		distinct gen,
+		CASE
+			WHEN UPPER(TRIM(gen)) in ('M', 'Male') THEN 'Male'
+			WHEN UPPER(TRIM(gen)) in ('F', 'FeMale') THEN 'Female'
+			ELSE 'n/a'
+		End AS gen
+	from Bronze.erp_cust_az12
+
+
+-- Final Cleansed Data
+-- And Insert into SILVER
+
+INSERT INTO Silver.erp_cust_az12
+	(
+		cid, bdate,gen
+	)
+
+Select 
+
+	CASE
+		WHEN cid like 'NAS%' THEN SUBSTRING(cid, 4, LEN(cid))
+		ELSE cid
+	END AS cid,
+		
+	CASE
+		WHEN bdate > GetDate() THEN NULL
+		ELSE bdate
+	END AS bdate,
+	
+	CASE
+			WHEN UPPER(TRIM(gen)) in ('M', 'Male') THEN 'Male'
+			WHEN UPPER(TRIM(gen)) in ('F', 'FeMale') THEN 'Female'
+			ELSE 'n/a'
+		End AS gen
+from Bronze.erp_cust_az12
+-- where bdate > GETDATE()
+
+-- TEST
+Select * from Silver.erp_cust_az12
+
+
+
+-- Check Quality of Locations data in Bronze
+
+Select * from Silver.erp_loc_a101
+
+--1 Check Quality of Cid -- It has '-'
+
+Select * from Bronze.crm_cust_info
+Select cid from Bronze.erp_loc_a101
+
+-- Replace '-' with ''
+
+--2 Check cntry Quality -- LOW Cardinality 
+Select distinct cntry from Bronze.erp_loc_a101
+Order by cntry 
+
+
+-- Finally Cleansewd Locations Data
+-- Move Data Into SILVER Layer
+
+insert into Silver.erp_loc_a101
+	(
+		cid,
+		cntry
+	)
+Select 
+	Replace(cid, '-', '') as cid,
+	
+	CASE
+		WHEN TRIM(cntry) = 'DE' THEN 'Germany'
+		WHEN TRIM(cntry) IN ('US','USA') THEN 'United States'
+		WHEN TRIM(cntry) = '' OR cntry IS NULL THEN 'n/a'
+		else TRIM(cntry)
+	end as cntry
+
+from Bronze.erp_loc_a101
+
+-- TEST
+
+Select * from Silver.erp_loc_a101
+
+
+-- Data Quality Check on -- Bronze.erp_px_cat_g1v2
+--	Cat id -- Okay
+
+Select * from Bronze.erp_px_cat_g1v2
+Select * from Silver.crm_prd_info
+
+-- Cat column
+-- SubCat Column
+-- Maintenace Colkumn Quality Checks -- Unwanted Spaces
+
+Select * from Bronze.erp_px_cat_g1v2
+where cat != TRIM(cat) 
+OR subcat != TRIM(subcat)
+OR maintenance != TRIM(maintenance)
+
+-- Cat and SubCat and Miantenace -- CHECK
+-- Data Standartizationm since Low Cardinality Column
+Select 
+	Distinct subcat
+from Bronze.erp_px_cat_g1v2
+
+
+-- Finally Cleansed Data
+-- Move Data
+
+Insert into Silver.erp_px_cat_g1v2
+	(
+		id,
+		cat,
+		subcat,
+		maintenance
+	)
+Select * from Bronze.erp_px_cat_g1v2
+
+
+-- TEST
+
+Select * from Silver.erp_px_cat_g1v2
+
+-- Finally SP to Load SILVER Layer
